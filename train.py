@@ -40,9 +40,19 @@ train_loss = 0
 bbox_loss, iou_loss, cls_loss = 0., 0., 0.
 cnt = 0
 t = Timer()
-step_cnt = 0
 
 epochs = 100
+
+def checkpoint(net, optim, checkpoint_name, epoch):
+    state_dict = net.state_dict()
+    for key in state_dict.keys():
+        state_dict[key] = state_dict[key].cpu()
+
+    torch.save({
+        'epoch': epoch,
+        'state_dict': state_dict,
+        'optimizer': optim},
+        checkpoint_name)
 
 def transform(im, boxes, labels):
     im = imcv2_recolor(im)
@@ -52,10 +62,20 @@ def transform(im, boxes, labels):
 
 dataset = Dataset('training_data', transform=transform)
 
-dataloader = data.DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn=detection_collate)
+dataloader = data.DataLoader(
+    dataset,
+    batch_size=batch_size,
+    shuffle=True,
+    num_workers=2,
+    collate_fn=detection_collate
+)
+
 batches_per_epoch = len(dataset) / batch_size
 
+best_loss = float('inf')
+
 for epoch in range(epochs):
+    epoch_loss = 0
     for step, (inputs, gt_boxes, gt_classes, dontcare) in enumerate(dataloader):
         t.tic()
 
@@ -70,33 +90,27 @@ for epoch in range(epochs):
         iou_loss += net.iou_loss.data.cpu().numpy()[0]
         cls_loss += net.cls_loss.data.cpu().numpy()[0]
         train_loss += loss.data.cpu().numpy()[0]
+        epoch_loss += loss.data[0]
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
-        cnt += 1
-        step_cnt += 1
         duration = t.toc()
         if step % cfg.disp_interval == 0:
-            train_loss /= cnt
-            bbox_loss /= cnt
-            iou_loss /= cnt
-            cls_loss /= cnt
             print('epoch %d[%d/%d], loss: %.3f, bbox_loss: %.3f, iou_loss: %.3f, cls_loss: %.3f (%.2f s/batch)' % (
                 epoch, step, batches_per_epoch, train_loss, bbox_loss, iou_loss, cls_loss, duration))
 
             train_loss = 0
             bbox_loss, iou_loss, cls_loss = 0., 0., 0.
-            cnt = 0
             t.clear()
 
     if epoch in cfg.lr_decay_epochs:
         lr *= cfg.lr_decay
         optimizer = torch.optim.SGD(net.parameters(), lr=lr, momentum=cfg.momentum, weight_decay=cfg.weight_decay)
 
-    save_name = os.path.join(cfg.train_output_dir, '{}_{}.h5'.format(cfg.exp_name, epoch))
-    net_utils.save_net(save_name, net)
-    print('save model: {}'.format(save_name))
-    step_cnt = 0
+    if epoch_loss < best_loss:
+        save_name = os.path.join(cfg.train_output_dir, '%s_best.pth' % cfg.exp_name)
+        checkpoint(net, optimizer, save_name, epoch)
+        print('save model: %s' % save_name)
 
 
 
