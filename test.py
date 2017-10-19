@@ -1,16 +1,17 @@
-import os
-import cv2
-import torch
-import numpy as np
-import cPickle
+#!/usr/bin/env python
 
+import torch, cv2
+import os, numpy as np, cPickle, psycopg2, argparse, pdb
 from darknet import Darknet19
 import utils.yolo as yolo_utils
 import utils.network as net_utils
 from utils.timer import Timer
-from datasets.pascal_voc import VOCDataset
+from Dataset import InferenceGenerator
 import cfgs.config as cfg
-
+from dotenv import load_dotenv, find_dotenv
+from torch.autograd import Variable
+from utils.im_transform import imcv2_recolor
+load_dotenv(find_dotenv())
 
 def preprocess(fname):
     # return fname
@@ -18,38 +19,32 @@ def preprocess(fname):
     im_data = np.expand_dims(yolo_utils.preprocess_test(image, cfg.inp_size), 0)
     return image, im_data
 
+def transform(im):
+    im = imcv2_recolor(im)
+    im = cv2.resize(im, (416, 416))
+    return im
 
-# hyper-parameters
-# ------------
-imdb_name = cfg.imdb_test
-# trained_model = cfg.trained_model
-trained_model = os.path.join(cfg.train_output_dir, 'darknet19_voc07trainval_exp3_118.h5')
-output_dir = cfg.test_output_dir
+class GenLoader:
+    def __init__(self, generator, batch_size=16):
+        self.generator = generator
+        self.batch_size = batch_size
 
-max_per_image = 300
-thresh = 0.01
-vis = False
-# ------------
+    def __next__(self):
+        batch = [next(self.generator) for _ in range(self.batch_size)]
+        inputs, originals, meta = zip(*batch)
+        return torch.stack(inputs, 0), originals, meta
 
+    def next(self):
+        return self.__next__()
 
-def test_net(net, imdb, max_per_image=300, thresh=0.5, vis=False):
-    num_images = imdb.num_images
+    def __iter__(self):
+        return self
 
-    # all detections are collected into:
-    #    all_boxes[cls][image] = N x 5 array of detections in
-    #    (x1, y1, x2, y2, score)
-    all_boxes = [[[] for _ in xrange(num_images)]
-                 for _ in xrange(imdb.num_classes)]
-
-    # timers
+def test_net(net, dataset, conn, max_per_image=300, thresh=0.5, vis=False):
+    loader = GenLoader(dataset)
     _t = {'im_detect': Timer(), 'misc': Timer()}
-    det_file = os.path.join(output_dir, 'detections.pkl')
-
-    for i in range(num_images):
-
-        batch = imdb.next_batch()
-        ori_im = batch['origin_im'][0]
-        im_data = net_utils.np_to_variable(batch['images'], is_cuda=True, volatile=True).permute(0, 3, 1, 2)
+    for inputs, originals, meta in loader:
+        im_data = Variable(inputs.cuda(), volatile=True)
 
         _t['im_detect'].tic()
         bbox_pred, iou_pred, prob_pred = net(im_data)
@@ -59,62 +54,72 @@ def test_net(net, imdb, max_per_image=300, thresh=0.5, vis=False):
         iou_pred = iou_pred.data.cpu().numpy()
         prob_pred = prob_pred.data.cpu().numpy()
 
-        bboxes, scores, cls_inds = yolo_utils.postprocess(bbox_pred, iou_pred, prob_pred, ori_im.shape, cfg, thresh)
-        detect_time = _t['im_detect'].toc()
+        for i in range(len(bbox_pred)):
+            bboxes, scores, cls_inds = yolo_utils.postprocess(
+                np.expand_dims(bbox_pred[i], 0), 
+                np.expand_dims(iou_pred[i], 0),
+                np.expand_dims(prob_pred[i], 0),
+                originals[i].shape,
+                cfg, 
+                thresh
+            )
 
-        _t['misc'].tic()
+            if len(bboxes) > 0:
+                orig = originals[i].copy()
 
-        for j in range(imdb.num_classes):
-            inds = np.where(cls_inds == j)[0]
-            if len(inds) == 0:
-                all_boxes[j][i] = np.empty([0, 5], dtype=np.float32)
-                continue
-            c_bboxes = bboxes[inds]
-            c_scores = scores[inds]
-            c_dets = np.hstack((c_bboxes, c_scores[:, np.newaxis])).astype(np.float32, copy=False)
-            all_boxes[j][i] = c_dets
+                for box in bboxes:
+                    cv2.rectangle(orig, tuple(box[:2]), tuple(box[2:]), (0,0,255))
 
-        # Limit to max_per_image detections *over all classes*
-        if max_per_image > 0:
-            image_scores = np.hstack([all_boxes[j][i][:, -1] for j in range(imdb.num_classes)])
-            if len(image_scores) > max_per_image:
-                image_thresh = np.sort(image_scores)[-max_per_image]
-                for j in xrange(1, imdb.num_classes):
-                    keep = np.where(all_boxes[j][i][:, -1] >= image_thresh)[0]
-                    all_boxes[j][i] = all_boxes[j][i][keep, :]
-        nms_time = _t['misc'].toc()
+                cv2.imwrite('./test.jpg', orig)
+                pdb.set_trace()
 
-        if i % 20 == 0:
-            print 'im_detect: {:d}/{:d} {:.3f}s {:.3f}s' \
-                .format(i + 1, num_images, detect_time, nms_time)
-            _t['im_detect'].clear()
-            _t['misc'].clear()
 
-        if vis:
-            im2show = yolo_utils.draw_detection(ori_im, bboxes, scores, cls_inds, cfg, thr=0.1)
-            if im2show.shape[0] > 1100:
-                im2show = cv2.resize(im2show, (int(1000. * float(im2show.shape[1]) / im2show.shape[0]), 1000))
-            cv2.imshow('test', im2show)
-            cv2.waitKey(0)
+        # detect_time = _t['im_detect'].toc()
 
-    with open(det_file, 'wb') as f:
-        cPickle.dump(all_boxes, f, cPickle.HIGHEST_PROTOCOL)
+        # _t['misc'].tic()
 
-    print 'Evaluating detections'
-    imdb.evaluate_detections(all_boxes, output_dir)
+        # pdb.set_trace()
+
+        # for j in range(imdb.num_classes):
+        #     inds = np.where(cls_inds == j)[0]
+        #     if len(inds) == 0:
+        #         all_boxes[j][i] = np.empty([0, 5], dtype=np.float32)
+        #         continue
+        #     c_bboxes = bboxes[inds]
+        #     c_scores = scores[inds]
+        #     c_dets = np.hstack((c_bboxes, c_scores[:, np.newaxis])).astype(np.float32, copy=False)
+        #     all_boxes[j][i] = c_dets
+
+        # # Limit to max_per_image detections *over all classes*
+        # if max_per_image > 0:
+        #     image_scores = np.hstack([all_boxes[j][i][:, -1] for j in range(imdb.num_classes)])
+        #     if len(image_scores) > max_per_image:
+        #         image_thresh = np.sort(image_scores)[-max_per_image]
+        #         for j in xrange(1, imdb.num_classes):
+        #             keep = np.where(all_boxes[j][i][:, -1] >= image_thresh)[0]
+        #             all_boxes[j][i] = all_boxes[j][i][keep, :]
+        # nms_time = _t['misc'].toc()
 
 
 if __name__ == '__main__':
-    # data loader
-    imdb = VOCDataset(imdb_name, cfg.DATA_DIR, cfg.batch_size,
-                      yolo_utils.preprocess_test, processes=2, shuffle=False, dst_size=cfg.inp_size)
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--country', required=True, help='Which country to process')
+    parser.add_argument('--weights', required=True, help='Weight file to use')
+    args = parser.parse_args()
+    
+    conn = psycopg2.connect(
+        dbname='aigh',
+        host=os.environ.get('DB_HOST', 'localhost'),
+        user=os.environ.get('DB_USER', ''),
+        password=os.environ.get('DB_PASSWORD', '')
+    )
+    dataset = InferenceGenerator(conn, args.country, transform=transform)
 
     net = Darknet19()
-    net_utils.load_net(trained_model, net)
+    net.load_state_dict(torch.load(args.weights)['state_dict'])
 
     net.cuda()
     net.eval()
 
-    test_net(net, imdb, max_per_image, thresh, vis)
+    test_net(net, dataset, conn)
 
-    imdb.close()
