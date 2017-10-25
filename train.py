@@ -12,6 +12,9 @@ from torch.multiprocessing import Pool
 from torch.utils import data
 from torch.autograd import Variable
 from utils.im_transform import imcv2_recolor
+from datetime import datetime
+
+TIMESTAMP = datetime.now().isoformat()
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--resume', help='Checkpoint .pth file to resume execution at')
@@ -148,7 +151,7 @@ for epoch in range(start_epoch, epochs):
 
     if test_loss < best_loss:
         best_loss = test_loss
-        save_name = os.path.join(cfg.train_output_dir, '%s_best.pth' % cfg.exp_name)
+        save_name = os.path.join(cfg.train_output_dir, '%s_%s_best.pth' % (cfg.exp_name, TIMESTAMP))
         checkpoint(net, optimizer, save_name, epoch)
         print('save model: %s' % save_name)
 
