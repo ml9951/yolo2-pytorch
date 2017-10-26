@@ -12,6 +12,9 @@ from torch.multiprocessing import Pool
 from torch.utils import data
 from torch.autograd import Variable
 from utils.im_transform import imcv2_recolor
+from datetime import datetime
+
+TIMESTAMP = datetime.now().isoformat()
 
 TIMESTAMP = datetime.datetime.now().isoformat()
 

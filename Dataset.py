@@ -17,12 +17,12 @@ def RandomSampler(conn, country, transform):
     write_cur = conn.cursor()
 
     read_cur.execute("""
-        SELECT filename FROM buildings.images
+        SELECT filename, ST_AsGeoJSON(shifted)::json FROM buildings.images
         WHERE project=%s AND (done IS NULL OR done=false)
         ORDER BY random()
     """, (country,))
 
-    for filename, in read_cur:
+    for filename, geom in read_cur:
         params = {'Bucket' : 'dg-images', 'Key' : filename}
         url = s3.generate_presigned_url(ClientMethod='get_object', Params=params)
         # Convert from RGB -> BGR and also strip off the bottom logo
@@ -40,7 +40,7 @@ def RandomSampler(conn, country, transform):
                 yield (
                     torch.from_numpy(transform(orig.copy().astype(float)).transpose((2,0,1))[(2,1,0),:,:]).float(),
                     orig,
-                    (x, y, filename, img)
+                    (x, y, filename, img, shape(geom))
                 )
         write_cur.execute("UPDATE buildings.images SET done=true WHERE project=%s AND filename=%s", (country, filename))
         conn.commit()

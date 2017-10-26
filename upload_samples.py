@@ -2,7 +2,7 @@
 
 import torch, cv2
 from darknet import Darknet19
-import argparse, pdb, psycopg2, os, numpy as np, cStringIO, requests
+import argparse, pdb, psycopg2, os, numpy as np, cStringIO, requests, json, re
 from Dataset import RandomSampler
 from torch.autograd import Variable
 from utils.im_transform import imcv2_recolor
@@ -18,8 +18,8 @@ def transform(im):
     im = cv2.resize(im, (416, 416))
     return im
 
-def process_file(filename, boxes, img_data, country):
-    boxes = np.concatenate(boxes, axis=0)
+def process_file(filename, boxes, img_data, country, img_geom):
+    boxes = np.concatenate(boxes, axis=0) if len(boxes) > 0 else boxes
     if len(boxes) > 0:
         labels = DBSCAN(eps=100, min_samples=1).fit(boxes[:, :2]).labels_
         if (labels >= 0).any():
@@ -38,21 +38,21 @@ def process_file(filename, boxes, img_data, country):
         xmin, xmax = cx - 250, cx + 250
         ymin, ymax = cy - 250, cy + 250
 
-        if minx < 0:
-            dx = -minx
-            minx, maxx = minx + dx, maxx + dx
-        if maxx > img_data.shape[1]:
-            dx = maxx - img_data.shape[1]
-            minx, maxx = minx - dx, maxx - dx
-        if miny < 0:
-            dy = -miny
-            miny, maxy = miny + dy, maxy + dy
-        if maxy > img_data.shape[0]:
-            dy = maxy - img_data.shape[0]
-            miny, maxy = miny - dy, maxy - dy
+        if xmin < 0:
+            dx = -xmin
+            xmin, xmax = xmin + dx, xmax + dx
+        if xmax > img_data.shape[1]:
+            dx = xmax - img_data.shape[1]
+            xmin, xmax = xmin - dx, xmax - dx
+        if ymin < 0:
+            dy = -ymin
+            ymin, ymax = ymin + dy, ymax + dy
+        if ymax > img_data.shape[0]:
+            dy = ymax - img_data.shape[0]
+            ymin, ymax = ymin - dy, ymax - dy
 
-        boxes[:, (0, 2)] -= minx
-        boxes[:, (1, 3)] -= miny
+        boxes[:, (0, 2)] -= xmin
+        boxes[:, (1, 3)] -= ymin
 
         boxes = np.clip(boxes, a_min=0, a_max=500)
         mask = (boxes[:,2] - boxes[:,0] >= 3) & (boxes[:,3] - boxes[:,1] >= 3)
@@ -63,22 +63,24 @@ def process_file(filename, boxes, img_data, country):
 
         binary = cStringIO.StringIO()
         binary.write(cv2.imencode('.jpg', img_data[ymin:ymax, xmin:xmax, :])[1].tostring())
-        binary.seek(0)
-
-        pdb.set_trace()
+        binary.reset()
 
         data = {
             'vectordata' : json.dumps(vdata),
-            'geom' : json.dumps(img_geom)
+            'geom' : json.dumps(mapping(img_geom))
         }
 
         files = {
             'file' : binary
         }
 
-        requests.post('https://aighmapper.ml/sample/%s' % country, data=data, files=files)
-
-        pdb.set_trace()
+        res = requests.post('https://aighmapper.ml/sample/%s' % country.replace('-overlap', ''), data=data, files=files)
+        if res.status_code == 200:
+            print('Successfully uploaded sample to server!')
+        else:
+            print(res.text)
+            return False
+    return True
 
 def sample(net, country, conn, max_samples = 20, batch_size = 16, thresh=0.5):
     gen = RandomSampler(conn, country, transform)
@@ -86,6 +88,8 @@ def sample(net, country, conn, max_samples = 20, batch_size = 16, thresh=0.5):
     img_boxes = []
     cur_filename = None
     cur_whole_img = None
+    cur_img_geom = None
+    cur = conn.cursor()
 
     while upload_count < max_samples:
         inputs, originals, meta = zip(*[next(gen) for _ in range(batch_size)])
@@ -99,12 +103,17 @@ def sample(net, country, conn, max_samples = 20, batch_size = 16, thresh=0.5):
         prob_pred = prob_pred.data.cpu().numpy()
 
         for i in range(len(bbox_pred)):
-            row_off, col_off, filename, whole_img = meta[i]
+            row_off, col_off, filename, whole_img, img_geom = meta[i]
             if filename != cur_filename:
-                process_file(cur_filename, img_boxes, cur_whole_img, country)
+                print('Finished processing file')
+                res = process_file(cur_filename, img_boxes, cur_whole_img, country, cur_img_geom)
+                if res and cur_filename:
+                    cur.execute("UPDATE buildings.images SET done=true WHERE project=%s AND filename=%s", (country, cur_filename))
+                    conn.commit()
                 img_boxes = []
                 cur_filename = filename
                 cur_whole_img = whole_img
+                cur_img_geom = img_geom
 
             bboxes, scores, cls_inds = yolo_utils.postprocess(
                 np.expand_dims(bbox_pred[i], 0), 
@@ -115,6 +124,15 @@ def sample(net, country, conn, max_samples = 20, batch_size = 16, thresh=0.5):
                 thresh
             )
             if len(bboxes) > 3:
+
+                img_data = originals[i].copy()
+                for box in bboxes:
+                    cv2.rectangle(img_data, tuple(box[:2]), tuple(box[2:]), (0,0,255))
+
+                cv2.imwrite('../samples/test/test.jpg', img_data)
+
+                pdb.set_trace()
+
                 bboxes[:, (0, 2)] + col_off
                 bboxes[:, (1, 3)] + row_off
                 img_boxes.append(np.concatenate([bboxes, np.expand_dims(scores, 1)], axis=1))
