@@ -1,4 +1,4 @@
-import cv2
+import cv2, pdb
 import os
 import numpy as np
 from im_transform import imcv2_affine_trans, imcv2_recolor
@@ -67,14 +67,14 @@ def preprocess_train(data):
         im = cv2.resize(im, (w, h))
     im = cv2.cvtColor(im, cv2.COLOR_BGR2RGB)
     im = imcv2_recolor(im)
-    # im /= 255.
-
-    # im = imcv2_recolor(im)
-    # h, w = inp_size
-    # im = cv2.resize(im, (w, h))
-    # im = cv2.cvtColor(im, cv2.COLOR_BGR2RGB)
-    # im /= 255
     boxes = np.asarray(boxes, dtype=np.int)
+
+    # Random mirroring
+    if np.random.randint(2):
+        im = im[:, ::-1]
+        boxes = boxes.copy()
+        boxes[:, 0::2] = w - boxes[:, 2::-2]
+
     return im, boxes, gt_classes, [], ori_im
 
 
