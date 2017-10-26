@@ -13,6 +13,8 @@ from torch.utils import data
 from torch.autograd import Variable
 from utils.im_transform import imcv2_recolor
 
+TIMESTAMP = datetime.datetime.now().isoformat()
+
 parser = argparse.ArgumentParser()
 parser.add_argument('--resume', help='Checkpoint .pth file to resume execution at')
 args = parser.parse_args()
@@ -146,9 +148,9 @@ for epoch in range(start_epoch, epochs):
                 epoch, step, len(validation_set) / batch_size, batch_loss, bbox_loss, iou_loss, cls_loss))
             bbox_loss, iou_loss, cls_loss, batch_loss = 0., 0., 0., 0.
 
-    if test_loss < best_loss:
-        best_loss = test_loss
-        save_name = os.path.join(cfg.train_output_dir, '%s_best.pth' % cfg.exp_name)
+    if epoch_loss < best_loss:
+        best_loss = epoch_loss
+        save_name = os.path.join(cfg.train_output_dir, '%s_%s_best.pth' % (cfg.exp_name, TIMESTAMP))
         checkpoint(net, optimizer, save_name, epoch)
         print('save model: %s' % save_name)
 
