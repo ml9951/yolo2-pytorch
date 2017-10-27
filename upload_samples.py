@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-import torch, cv2
+import torch, cv2, sys
 from darknet import Darknet19
 import argparse, pdb, psycopg2, os, numpy as np, cStringIO, requests, json, re
 from Dataset import RandomSampler
@@ -77,6 +77,7 @@ def process_file(filename, boxes, img_data, country, img_geom):
         res = requests.post('https://aighmapper.ml/sample/%s' % country.replace('-overlap', ''), data=data, files=files)
         if res.status_code == 200:
             print('Successfully uploaded sample to server!')
+            pdb.set_trace()
         else:
             print(res.text)
             return False
@@ -129,20 +130,18 @@ def sample(net, country, conn, max_samples = 20, batch_size = 16, thresh=0.5):
                 for box in bboxes:
                     cv2.rectangle(img_data, tuple(box[:2]), tuple(box[2:]), (0,0,255))
 
-                cv2.imwrite('../samples/test/test.jpg', img_data)
+                cv2.imwrite('test.jpg', img_data)
 
-                pdb.set_trace()
-
-                bboxes[:, (0, 2)] + col_off
-                bboxes[:, (1, 3)] + row_off
+                bboxes[:, (0, 2)] += col_off
+                bboxes[:, (1, 3)] += row_off
                 img_boxes.append(np.concatenate([bboxes, np.expand_dims(scores, 1)], axis=1))
-
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--country', help='Which country to process', required=True)
     parser.add_argument('--weights', required=True, help='Weight file to use')
     parser.add_argument('--num_samples', type=int, default=20, help='Number of samples to upload')
+    parser.add_argument('--thresh', type=float, help='Confidence threshold')
     args = parser.parse_args()
 
     conn = psycopg2.connect(
@@ -152,10 +151,26 @@ if __name__ == '__main__':
         password=os.environ.get('DB_PASSWORD', '')
     )
 
+    checkpoint = torch.load(args.weights)
+
     net = Darknet19()
-    net.load_state_dict(torch.load(args.weights)['state_dict'])
+    net.load_state_dict(checkpoint['state_dict'])
 
     net.cuda()
     net.eval()
 
-    sample(net, args.country, conn, max_samples = args.num_samples)
+    if 'stats' in checkpoint:
+        args.thresh = checkpoint['stats']['thresh']
+    elif not args.thresh:
+        print('Error: no threshold specified in checkpoint and missing command line arg')
+        sys.exit(1)
+
+    print('Using threshold: %f' % args.thresh)
+
+    sample(net, args.country, conn, max_samples = args.num_samples, thresh=args.thresh)
+
+
+
+
+
+
