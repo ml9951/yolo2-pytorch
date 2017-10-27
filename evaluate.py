@@ -54,7 +54,7 @@ def get_metrics(gt_boxes, pred_boxes):
 
 def img_iter(test_set, data_dir):
     for sample in test_set:
-        img = cv2.imread(os.path.join(data_dir, '..', sample['image_path']))
+        img = cv2.imread(os.path.join(data_dir, sample['image_path']))
 
         boxes = np.array([[r['x1'], r['y1'], r['x2'], r['y2']] for r in sample['rects']])
 
@@ -73,8 +73,8 @@ def img_iter(test_set, data_dir):
 
 def test_net(net, test_set, data_dir, batch_size = 16, thresh=0.5):
     dataset = img_iter(test_set, data_dir)
-    results = []
-    for i in tqdm(range(0, len(test_set), batch_size)):
+    false_positives, false_negatives, true_positives, num_samples = 0,0,0,0
+    for batch in range(0, len(test_set), batch_size):
         inputs, originals, targets = zip(*[next(dataset) for _ in range(batch_size)])
         inputs = Variable(torch.stack(inputs, 0).cuda(), volatile=True)
 
@@ -85,6 +85,8 @@ def test_net(net, test_set, data_dir, batch_size = 16, thresh=0.5):
         iou_pred = iou_pred.data.cpu().numpy()
         prob_pred = prob_pred.data.cpu().numpy()
 
+        ridx = np.random.randint(len(bbox_pred))
+
         for i in range(len(bbox_pred)):
             bboxes, scores, cls_inds = yolo_utils.postprocess(
                 np.expand_dims(bbox_pred[i], 0), 
@@ -94,29 +96,72 @@ def test_net(net, test_set, data_dir, batch_size = 16, thresh=0.5):
                 cfg, 
                 thresh
             )
-            fp, fn, tp, jaccard = get_metrics(targets[i], bboxes)
-            results.append({
-                'false_positives' : fp,
-                'false_negatives' : fn,
-                'true_positives' : tp,
-                'jaccard' : jaccard
-            })
 
-    pandas.DataFrame(results).to_csv('results.csv', index=False)
+            if ridx == i:
+                orig = originals[i].copy()
+                for box in bboxes:
+                    cv2.rectangle(orig, tuple(box[:2]), tuple(box[2:]), (0,0,255))
+                cv2.imwrite('samples/sample_%d.jpg' % batch, orig)
+
+            fp, fn, tp, jaccard = get_metrics(targets[i], bboxes)
+            false_positives += fp
+            false_negatives += fn
+            true_positives += tp
+            num_samples += len(targets[i])
+        print('False positivies: %d, False negatives: %d, True positivies: %d, Precision: %f, Recall: %f' % 
+            (false_positives, false_negatives, true_positives, float(true_positives)/(true_positives + false_positives), float(true_positives)/(true_positives + false_negatives)))
+    return false_positives, false_negatives, true_positives, num_samples
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--weights', required=True, help='Weight file to use')
+    parser.add_argument('--thresh', default=0.5, type=float, help='Confidence threshold')
     parser.add_argument('--test_set', default='../data/val_data.json', help='JSON file describing the test data')
     args = parser.parse_args()
-    
+
+    if not os.path.exists('samples'):
+        os.mkdir('samples')
+
     data_dir = os.path.dirname(os.path.abspath(args.test_set))
     test_set = json.load(open(args.test_set))
+    test_set = filter(lambda s: 'AOI' not in s['image_path'], test_set)
 
+    checkpoint = torch.load(args.weights)
     net = Darknet19()
-    net.load_state_dict(torch.load(args.weights)['state_dict'])
+    net.load_state_dict(checkpoint['state_dict'])
 
     net.cuda()
     net.eval()
 
-    test_net(net, test_set, data_dir)
+    fp, fn, tp, N = test_net(net, test_set, data_dir, thresh=args.thresh)
+    precision = float(tp)/(tp + fp)
+    recall = float(tp) / (tp + fn)
+    stats = {
+        'false_negatives' : fn,
+        'false_positives' : fp,
+        'true_positives' : tp,
+        'num_samples' : N,
+        'precision' : precision,
+        'recall' : recall,
+        'thresh' : args.thresh
+    }
+    checkpoint['stats'] = stats
+
+    torch.save(checkpoint, args.weights)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
